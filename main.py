@@ -26,6 +26,7 @@ def default_config():
         'forcing_params': {},
         'RNG_seed': 12345,
         'save_prefix': 'run',
+        # Blow-up detection tunables
         'blowup_enable': True,
         'bkm_alert_threshold': 1e-1,
         'omega_growth_factor': 5.0,
@@ -37,6 +38,7 @@ def default_config():
         'blowup_crash_dump_dir': 'crash_dumps',
         'blowup_verbose': True,
         # Thresholds (come back to this they're definitley wrong)
+
         'blowup_enable': True,
         'bkm_alert_threshold': 1e-1,
         'omega_growth_factor': 5.0,
@@ -121,7 +123,42 @@ def grad_phi_to_faces(phi, dx, dy, dz): #idk if this works properly
     grad_z[:,:,-1] = grad_z[:,:,0]
     return grad_x, grad_y, grad_z
 
-#convective term? leave untill the end
+#Convective Term? leave until the end
+def convective_term(u, v, w, dx, dy, dz):
+    uc = avg_u_to_center(u)
+    vc = avg_v_to_center(v)
+    wc = avg_w_to_center(w)
+    duc_dx = (np.roll(uc, -1, axis=0) - np.roll(uc, 1, axis=0)) / (2.0*dx)
+    duc_dy = (np.roll(uc, -1, axis=1) - np.roll(uc, 1, axis=1)) / (2.0*dy)
+    duc_dz = (np.roll(uc, -1, axis=2) - np.roll(uc, 1, axis=2)) / (2.0*dz)
+    dvc_dx = (np.roll(vc, -1, axis=0) - np.roll(vc, 1, axis=0)) / (2.0*dx)
+    dvc_dy = (np.roll(vc, -1, axis=1) - np.roll(vc, 1, axis=1)) / (2.0*dy)
+    dvc_dz = (np.roll(vc, -1, axis=2) - np.roll(vc, 1, axis=2)) / (2.0*dz)
+    dwc_dx = (np.roll(wc, -1, axis=0) - np.roll(wc, 1, axis=0)) / (2.0*dx)
+    dwc_dy = (np.roll(wc, -1, axis=1) - np.roll(wc, 1, axis=1)) / (2.0*dy)
+    dwc_dz = (np.roll(wc, -1, axis=2) - np.roll(wc, 1, axis=2)) / (2.0*dz)
+    adv_c_u = uc * duc_dx + vc * duc_dy + wc * duc_dz
+    adv_c_v = uc * dvc_dx + vc * dvc_dy + wc * dvc_dz
+    adv_c_w = uc * dwc_dx + vc * dwc_dy + wc * dwc_dz
+    divc_u = (np.roll(uc*uc, -1, axis=0) - np.roll(uc*uc, 1, axis=0)) / (2.0*dx)
+    divc_uv = (np.roll(uc*vc, -1, axis=1) - np.roll(uc*vc, 1, axis=1)) / (2.0*dy)
+    divc_uw = (np.roll(uc*wc, -1, axis=2) - np.roll(uc*wc, 1, axis=2)) / (2.0*dz)
+    div_form_u = divc_u + divc_uv + divc_uw
+    divc_vu = (np.roll(vc*uc, -1, axis=0) - np.roll(vc*uc, 1, axis=0)) / (2.0*dx)
+    divc_v = (np.roll(vc*vc, -1, axis=1) - np.roll(vc*vc, 1, axis=1)) / (2.0*dy)
+    divc_vw = (np.roll(vc*wc, -1, axis=2) - np.roll(vc*wc, 1, axis=2)) / (2.0*dz)
+    div_form_v = divc_vu + divc_v + divc_vw
+    divc_wu = (np.roll(wc*uc, -1, axis=0) - np.roll(wc*uc, 1, axis=0)) / (2.0*dx)
+    divc_wv = (np.roll(wc*vc, -1, axis=1) - np.roll(wc*vc, 1, axis=1)) / (2.0*dy)
+    divc_w = (np.roll(wc*wc, -1, axis=2) - np.roll(wc*wc, 1, axis=2)) / (2.0*dz)
+    div_form_w = divc_wu + divc_wv + divc_w
+    Cc_u = 0.5 * (adv_c_u + div_form_u)
+    Cc_v = 0.5 * (adv_c_v + div_form_v)
+    Cc_w = 0.5 * (adv_c_w + div_form_w)
+    Cu = avg_center_to_u(Cc_u)
+    Cv = avg_center_to_v(Cc_v)
+    Cw = avg_center_to_w(Cc_w)
+    return Cu, Cv, Cw
 
 #poisson solver
 def solve_poisson_fft(rhs, grid):
@@ -137,7 +174,6 @@ def solve_poisson_fft(rhs, grid):
     phi_hat[0,0,0] = 0.0
     phi = irfftn(phi_hat, s=(Nx, Ny, Nz))
     return phi
-
 
 #forcing util
 def compute_forcing_fields(grid, kind=None, params=None):
@@ -211,6 +247,7 @@ def energy_spectrum(u, v, w, grid):
             E_shell[kbin] += Ek_r[i]
             counts[kbin] += 1
     return np.arange(len(E_shell)), E_shell, counts
+
 #initial conditions
 def ic_taylor_green(Nx, Ny, Nz, Lx, Ly, Lz, k0=1, amplitude=1.0):
     x = np.linspace(0, Lx, Nx, endpoint=False)
@@ -402,7 +439,7 @@ def save_state_npz(filename, u, v, w, p, time_val, step, diagnostics, config):
                         config=config)
     print(f"[IO] saved {filename}")
 
-
+#time stepper & main
 def compute_dt(u, v, w, dx, dy, dz, Re, CFL, safety, dt_max):
     umax = np.max(np.abs(u)); vmax = np.max(np.abs(v)); wmax = np.max(np.abs(w))
     tiny = 1e-16
