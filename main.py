@@ -18,8 +18,8 @@ def default_config():
         'IC_params': {},
         'CFL': 0.5,
         'safety': 0.5,
-        't_end': 1.0,
-        'max_steps': 1000,
+        't_end': 0.5,
+        'max_steps': 100,
         'dt_max': 1e-3,
         'output_interval': 50,
         'forcing': False,
@@ -28,28 +28,20 @@ def default_config():
         'save_prefix': 'run',
         # Blow-up detection tunables
         'blowup_enable': True,
-        'bkm_alert_threshold': 1e-1,
-        'omega_growth_factor': 5.0,
+        'bkm_alert_threshold': 2.0,
+        'omega_growth_factor': 20.0,
         'omega_min_growth_rate': 1e-3,
-        'spectral_pileup_ratio': 1e-3,
-        'blowup_check_window': 10,
+        'spectral_pileup_ratio': 1e-1,
+        'blowup_check_window': 20,
         'blowup_local_patch_radius': 8,
         'blowup_extra_output_steps': 50,
         'blowup_crash_dump_dir': 'crash_dumps',
         'blowup_verbose': True,
-        # Thresholds (come back to this they're definitley wrong)
-
-        'blowup_enable': True,
-        'bkm_alert_threshold': 1e-1,
-        'omega_growth_factor': 5.0,
-        'omega_min_growth_rate': 1e-3,
-        'spectral_pileup_ratio': 1e-3,
-        'blowup_check_window': 10,
-        'bkm_delta_threshold': 1e-2,
-        'blowup_fit_r2': 0.90,
-        'blowup_fit_alpha': 0.5,
-        'blowup_fit_time_horizon_factor': 5.0,
-        'blowup_min_consecutive_triggers': 2,
+        'bkm_delta_threshold': 2.0,
+        'blowup_fit_r2': 0.95,
+        'blowup_fit_alpha': 0.75,
+        'blowup_fit_time_horizon_factor': 10.0,
+        'blowup_min_consecutive_triggers': 5,
     }
 
 #grid util
@@ -530,7 +522,7 @@ def run_simulation(config, verbose=True):
             if (div_growth_rate >= div_growth_threshold) or (step % alert_interval == 0):
                 divergence_alert = True
         if nondiv_flag:
-            if config.get('blowup_verbose', True):
+            if config.get('blowup_verbose') == 'True':
                 print(f"[BLOWUP ALERT] step={step} t={t:.5e}:")
                 for r in nondiv_reasons:
                     print("   -", r)
