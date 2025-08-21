@@ -403,10 +403,194 @@ def save_state_npz(filename, u, v, w, p, time_val, step, diagnostics, config):
     print(f"[IO] saved {filename}")
 
 
-#time stepper & main
+def compute_dt(u, v, w, dx, dy, dz, Re, CFL, safety, dt_max):
+    umax = np.max(np.abs(u)); vmax = np.max(np.abs(v)); wmax = np.max(np.abs(w))
+    tiny = 1e-16
+    dt_conv = CFL * min(dx / (umax + tiny), dy / (vmax + tiny), dz / (wmax + tiny))
+    inv_dt_diff = (1.0 / Re) * (2.0 / dx**2 + 2.0 / dy**2 + 2.0 / dz**2)
+    dt_diff = safety / (inv_dt_diff + tiny)
+    dt = min(dt_conv, dt_diff, dt_max)
+    return dt, dt_conv, dt_diff
 
-#batch sweeper
+def run_simulation(config, verbose=True):
+    Nx, Ny, Nz = config['Nx'], config['Ny'], config['Nz']
+    Lx, Ly, Lz = config['Lx'], config['Ly'], config['Lz']
+    Re = config['Re']; CFL = config['CFL']; safety = config['safety']
+    dt_max = config['dt_max']; t_end = config['t_end']; max_steps = config['max_steps']
+    IC_name = config['IC']; IC_params = config.get('IC_params', {})
+    output_interval = config['output_interval']
+    forcing_flag = config['forcing']; forcing_params = config.get('forcing_params', {})
+    seed = config['RNG_seed']; prefix = config.get('save_prefix','run')
+    grid = create_grid(Nx, Ny, Nz, Lx, Ly, Lz); dx = grid['dx']; dy = grid['dy']; dz = grid['dz']
+    u = np.zeros((Nx+1, Ny, Nz), dtype=np.float64)
+    v = np.zeros((Nx, Ny+1, Nz), dtype=np.float64)
+    w = np.zeros((Nx, Ny, Nz+1), dtype=np.float64)
+    p = np.zeros((Nx, Ny, Nz), dtype=np.float64)
+    np.random.seed(seed)
+    if IC_name not in IC_REG:
+        raise ValueError(f"Unknown IC '{IC_name}'")
+    ui, vi, wi, pi = IC_REG[IC_name](Nx, Ny, Nz, Lx, Ly, Lz, **IC_params)
+    u[:] = ui; v[:] = vi; w[:] = wi; p[:] = pi
+    t = 0.0; step = 0
+    bkm_integral = 0.0; last_omega_max = 0.0
+    diagnostics_history = {'time':[], 'omega_max':[], 'bkm':[], 'energy':[], 'dissipation':[], 'div_max':[]}
+    blowup_mode_counter = 0
+    log_rows = []
+    prev_div_max = np.max(np.abs(divergence_mac(u, v, w, dx, dy, dz)))
+    alert_interval = config.get('blowup_alert_interval', 10)
+    div_threshold = config.get('blowup_divergence_threshold', 1)
+    div_growth_threshold = config.get('blowup_divergence_growth_rate', 1)
+    logfile = config.get('blowup_logfile', 'blowup_log.txt')
+    try:
+        open(logfile, 'w').close()
+    except Exception:
+        pass
+    start_time = time.time()
+    if verbose:
+        print(f"[init] max|div| = {prev_div_max:.3e}")
+    while (t < t_end - 1e-16) and (step < max_steps):
+        dt, dt_conv, dt_diff = compute_dt(u, v, w, dx, dy, dz, Re, CFL, safety, dt_max)
+        C_u, C_v, C_w = convective_term(u, v, w, dx, dy, dz)
+        L_u = laplacian(u, dx, dy, dz); L_v = laplacian(v, dx, dy, dz); L_w = laplacian(w, dx, dy, dz)
+        if forcing_flag:
+            f_u, f_v, f_w = compute_forcing_fields(grid, config.get('forcing_kind'), forcing_params)
+        else:
+            f_u = np.zeros_like(u); f_v = np.zeros_like(v); f_w = np.zeros_like(w)
+        u_star = u + dt * (-C_u + (1.0/Re) * L_u + f_u)
+        v_star = v + dt * (-C_v + (1.0/Re) * L_v + f_v)
+        w_star = w + dt * (-C_w + (1.0/Re) * L_w + f_w)
+        div_star = divergence_mac(u_star, v_star, w_star, dx, dy, dz)
+        rhs = div_star / dt
+        phi = solve_poisson_fft(rhs, grid)
+        grad_x, grad_y, grad_z = grad_phi_to_faces(phi, dx, dy, dz)
+        u_new = u_star - dt * grad_x
+        v_new = v_star - dt * grad_y
+        w_new = w_star - dt * grad_z
+        p += phi
+        p -= np.mean(p)
+        u[:] = u_new; v[:] = v_new; w[:] = w_new
+        t += dt; step += 1
+        div_max, div_L2 = divergence_norms(u, v, w, dx, dy, dz)
+        vor_mag, _ = vorticity_fields(u, v, w, dx, dy, dz)
+        omega_max = np.max(vor_mag)
+        energy = kinetic_energy(u, v, w)
+        eps = dissipation(u, v, w, dx, dy, dz, Re)
+        bkm_integral += 0.5 * (last_omega_max + omega_max) * dt
+        last_omega_max = omega_max
+        diagnostics_history['time'].append(t)
+        diagnostics_history['omega_max'].append(omega_max)
+        diagnostics_history['bkm'].append(bkm_integral)
+        diagnostics_history['energy'].append(energy)
+        diagnostics_history['dissipation'].append(eps)
+        diagnostics_history['div_max'].append(div_max)
+        nondiv_flag, nondiv_reasons, nondiv_info = detect_blowup_nondivergence(diagnostics_history, grid, u, v, w, config)
+        div_growth_rate = (div_max - prev_div_max) / (dt + 1e-20)
+        prev_div_max = div_max
+        divergence_reason = False
+        divergence_alert = False
+        if div_max >= div_threshold:
+            divergence_reason = True
+            if (div_growth_rate >= div_growth_threshold) or (step % alert_interval == 0):
+                divergence_alert = True
+        if nondiv_flag:
+            if config.get('blowup_verbose', True):
+                print(f"[BLOWUP ALERT] step={step} t={t:.5e}:")
+                for r in nondiv_reasons:
+                    print("   -", r)
+                if 'fit' in nondiv_info:
+                    fr = nondiv_info['fit']
+                    print(f"   fit -> T*={fr['T_star']:.5e}, alpha={fr['alpha']:.3f}, R2={fr['r2']:.3f}")
+            crash_path = save_crash_report(prefix, step, t, u, v, w, p, diagnostics_history, nondiv_info.get('fit',{}), grid, config)
+            if config.get('blowup_verbose', True):
+                print(f"[BLOWUP] Crash dump saved to {crash_path}")
+            blowup_mode_counter = config.get('blowup_extra_output_steps', 50)
+        elif divergence_reason:
+            if divergence_alert:
+                if config.get('blowup_verbose', True):
+                    print(f"[BLOWUP ALERT - divergence] step={step} t={t:.5e}: max|div|={div_max:.3e}, growth_rate={div_growth_rate:.3e}")
+                crash_path = save_crash_report(prefix, step, t, u, v, w, p, diagnostics_history, nondiv_info.get('fit',{}), grid, config)
+                if config.get('blowup_verbose', True):
+                    print(f"[BLOWUP] Crash dump saved to {crash_path}")
+                blowup_mode_counter = config.get('blowup_extra_output_steps', 50)
+            else:
+                try:
+                    with open(logfile, 'a') as f:
+                        f.write(f"{datetime.utcnow().isoformat()} - step {step} t={t:.5e} max|div|={div_max:.6e} growth={div_growth_rate:.6e}\n")
+                except Exception:
+                    pass
+        if blowup_mode_counter > 0:
+            blowup_mode_counter -= 1
+            effective_output_interval = max(1, output_interval // 10)
+        else:
+            effective_output_interval = output_interval
+        if (step % effective_output_interval) == 0 or step == 1 or t >= t_end - 1e-16:
+            fname = f"{prefix}_state_step{step:06d}.npz"
+            save_state_npz(fname, u, v, w, p, t, step, {'energy':energy, 'dissipation':eps, 'omega_max':omega_max, 'div_max':div_max}, config)
+        log_rows.append((step, t, dt, dt_conv, dt_diff, float(div_max), float(div_L2), float(omega_max), float(energy), float(eps)))
+        if not np.isfinite(energy) or np.isnan(energy):
+            print("Aborting: non-finite energy detected.")
+            break
+        if np.max(np.abs(u)) > 1e8 or np.max(np.abs(v)) > 1e8 or np.max(np.abs(w)) > 1e8:
+            print("Aborting: velocities exploded.")
+            break
+        if verbose and (step % max(1, effective_output_interval//2) == 0):
+            print(f"[step {step:5d}] t={t:.5e} dt={dt:.2e} div_max={div_max:.3e} omega_max={omega_max:.3e} K={energy:.5e}")
+    wall = time.time() - start_time
+    if verbose:
+        print(f"Run complete: steps={step} time={t:.5e} walltime={wall:.2f}s BKM_integral={bkm_integral:.5e}")
+    save_state_npz(f"{prefix}_final.npz", u, v, w, p, t, step, {'energy':energy, 'dissipation':eps, 'omega_max':omega_max, 'div_max':div_max, 'BKM':bkm_integral}, config)
+    csvname = f"{prefix}_log.csv"
+    with open(csvname, 'w') as f:
+        f.write("step,time,dt,dt_conv,dt_diff,div_max,div_L2,omega_max,energy,dissipation\n")
+        for r in log_rows:
+            f.write(",".join(map(str, r)) + "\n")
+    return {'steps': step, 'time': t, 'BKM': bkm_integral, 'final_energy': energy, 'walltime': wall}
+
+#batch sweeper (optional not included rn)
+def batch_sweep(resolutions, Res, ICs, base_config):
+    rows = [("Nx","Ny","Nz","Re","IC","steps","time","final_energy","BKM","walltime")]
+    for Nx, Re in itertools.product(resolutions, Res):
+        cfg = base_config.copy()
+        cfg['Nx'] = cfg['Ny'] = cfg['Nz'] = Nx
+        cfg['Re'] = Re
+        cfg['IC'] = ICs[0]
+        cfg['output_interval'] = max(1, cfg['max_steps']//10)
+        cfg['save_prefix'] = f"batch_N{Nx}_Re{Re}"
+        res = run_simulation(cfg, verbose=False)
+        rows.append((Nx,Nx,Nx,Re,cfg['IC'],res['steps'],res['time'],res['final_energy'],res['BKM'],res['walltime']))
+    with open("batch_summary.csv",'w') as f:
+        for r in rows:
+            f.write(",".join(map(str,r)) + "\n")
+    print("Batch sweep finished, summary in batch_summary.csv")
 
 #parser
+def parse_cli():
+    parser = argparse.ArgumentParser(description="3D Navier-Stokes MAC solver (Forward Euler, FFT Poisson)")
+    parser.add_argument('--Nx', type=int, default=64)
+    parser.add_argument('--Ny', type=int, default=64)
+    parser.add_argument('--Nz', type=int, default=64)
+    parser.add_argument('--Re', type=float, default=100.0)
+    parser.add_argument('--IC', type=str, default='taylor-green', choices=list(IC_REG.keys()))
+    parser.add_argument('--t_end', type=float, default=10.0)
+    parser.add_argument('--dt_max', type=float, default=1e-3)
+    parser.add_argument('--CFL', type=float, default=0.5)
+    parser.add_argument('--safety', type=float, default=0.5)
+    parser.add_argument('--output_interval', type=int, default=50)
+    parser.add_argument('--forcing', action='store_true')
+    parser.add_argument('--seed', type=int, default=12345)
+    parser.add_argument('--save_prefix', type=str, default='run')
+    args, unknown = parser.parse_known_args()
+    cfg = default_config()
+    cfg.update({'Nx':args.Nx,'Ny':args.Ny,'Nz':args.Nz,'Re':args.Re,'IC':args.IC,'t_end':args.t_end,
+                'dt_max':args.dt_max,'CFL':args.CFL,'safety':args.safety,'output_interval':args.output_interval,
+                'forcing':args.forcing,'RNG_seed':args.seed,'save_prefix':args.save_prefix})
+    return cfg
 
 #entrypoint
+if __name__ == "__main__":
+    cfg = parse_cli()
+    print("Configuration:")
+    for k,v in cfg.items():
+        print(f"  {k}: {v}")
+    stats = run_simulation(cfg, verbose=True)
+    print("Done. Summary:", stats)
