@@ -61,6 +61,65 @@ def create_grid(Nx, Ny, Nz, Lx, Ly, Lz):
     return {'dx': dx, 'dy': dy, 'dz': dz, 'kx': kx, 'ky': ky, 'kz': kz, 'Nx': Nx, 'Ny': Ny, 'Nz': Nz, 'Lx': Lx, 'Ly': Ly, 'Lz': Lz}
 
 #interpolations and MAC operators
+def avg_u_to_center(u):
+    return 0.5 * (u[0:-1, :, :] + u[1:, :, :])
+
+def avg_v_to_center(v):
+    return 0.5 * (v[:, 0:-1, :] + v[:, 1:, :])
+
+def avg_w_to_center(w):
+    return 0.5 * (w[:, :, 0:-1] + w[:, :, 1:])
+
+def avg_center_to_u(u_center):
+    Nx, Ny, Nz = u_center.shape
+    u_face = np.empty((Nx+1, Ny, Nz), dtype=u_center.dtype)
+    u_face[1:-1, :, :] = 0.5 * (u_center[0:-1, :, :] + u_center[1:, :, :])
+    u_face[0, :, :] = 0.5 * (u_center[-1, :, :] + u_center[0, :, :])
+    u_face[-1, :, :] = u_face[0, :, :]
+    return u_face
+
+def avg_center_to_v(v_center):
+    Nx, Ny, Nz = v_center.shape
+    v_face = np.empty((Nx, Ny+1, Nz), dtype=v_center.dtype)
+    v_face[:,1:-1,:] = 0.5 * (v_center[:,0:-1,:] + v_center[:,1:,:])
+    v_face[:,0,:] = 0.5 * (v_center[:,-1,:] + v_center[:,0,:])
+    v_face[:,-1,:] = v_face[:,0,:]
+    return v_face
+
+def avg_center_to_w(w_center):
+    Nx, Ny, Nz = w_center.shape
+    w_face = np.empty((Nx, Ny, Nz+1), dtype=w_center.dtype)
+    w_face[:,:,1:-1] = 0.5 * (w_center[:,:,0:-1] + w_center[:,:,1:])
+    w_face[:,:,0] = 0.5 * (w_center[:,:,-1] + w_center[:,:,0])
+    w_face[:,:,-1] = w_face[:,:,0]
+    return w_face
+
+def laplacian(arr, dx, dy, dz):
+    return ((np.roll(arr, -1, axis=0) - 2*arr + np.roll(arr, 1, axis=0))/dx**2 +
+            (np.roll(arr, -1, axis=1) - 2*arr + np.roll(arr, 1, axis=1))/dy**2 +
+            (np.roll(arr, -1, axis=2) - 2*arr + np.roll(arr, 1, axis=2))/dz**2)
+
+def divergence_mac(u, v, w, dx, dy, dz):
+    div = (u[1:,:,:] - u[:-1,:,:]) / dx
+    div += (v[:,1:,:] - v[:,:-1,:]) / dy
+    div += (w[:,:,1:] - w[:,:,:-1]) / dz
+    return div
+
+def grad_phi_to_faces(phi, dx, dy, dz): #idk if this works properly
+    Nx, Ny, Nz = phi.shape
+    grad_x = np.empty((Nx+1, Ny, Nz), dtype=phi.dtype)
+    grad_x[1:-1,:,:] = (phi[1:,:,:] - phi[:-1,:,:]) / dx
+    grad_x[0,:,:] = (phi[0,:,:] - phi[-1,:,:]) / dx
+    grad_x[-1,:,:] = grad_x[0,:,:]
+    grad_y = np.empty((Nx, Ny+1, Nz), dtype=phi.dtype)
+    grad_y[:,1:-1,:] = (phi[:,1:,:] - phi[:,:-1,:]) / dy
+    grad_y[:,0,:] = (phi[:,0,:] - phi[:,-1,:]) / dy
+    grad_y[:,-1,:] = grad_y[:,0,:]
+    grad_z = np.empty((Nx, Ny, Nz+1), dtype=phi.dtype)
+    grad_z[:,:,1:-1] = (phi[:,:,1:] - phi[:,:,:-1]) / dz
+    grad_z[:,:,0] = (phi[:,:,0] - phi[:,:,-1]) / dz
+    grad_z[:,:,-1] = grad_z[:,:,0]
+    return grad_x, grad_y, grad_z
 
 #convective term? leave untill the end
 
