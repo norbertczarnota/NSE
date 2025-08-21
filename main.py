@@ -124,8 +124,35 @@ def grad_phi_to_faces(phi, dx, dy, dz): #idk if this works properly
 #convective term? leave untill the end
 
 #poisson solver
+def solve_poisson_fft(rhs, grid):
+    Nx, Ny, Nz = grid['Nx'], grid['Ny'], grid['Nz']
+    R_hat = rfftn(rhs, s=(Nx, Ny, Nz))
+    kx = grid['kx'][:, None, None]
+    ky = grid['ky'][None, :, None]
+    kz = grid['kz'][None, None, :]
+    k2 = kx**2 + ky**2 + kz**2
+    phi_hat = np.zeros_like(R_hat)
+    mask = (k2 != 0.0)
+    phi_hat[mask] = R_hat[mask] / (-k2[mask])
+    phi_hat[0,0,0] = 0.0
+    phi = irfftn(phi_hat, s=(Nx, Ny, Nz))
+    return phi
+
 
 #forcing util
+def compute_forcing_fields(grid, kind=None, params=None):
+    Nx, Ny, Nz = grid['Nx'], grid['Ny'], grid['Nz']
+    dx, dy, dz = grid['dx'], grid['dy'], grid['dz']
+    Lx, Ly, Lz = grid['Lx'], grid['Ly'], grid['Lz']
+    if not kind:
+        return np.zeros((Nx+1, Ny, Nz)), np.zeros((Nx, Ny+1, Nz)), np.zeros((Nx, Ny, Nz+1))
+    if kind == 'kolmogorov':
+        F = params.get('F', 1.0); k = params.get('k', 1)
+        y_u = (np.arange(Ny) + 0.5) * dy
+        f_u = F * np.sin(k * y_u)[None, :, None]
+        f_u = np.tile(f_u, (Nx+1, 1, Nz))
+        return f_u, np.zeros((Nx, Ny+1, Nz)), np.zeros((Nx, Ny, Nz+1))
+    return np.zeros((Nx+1, Ny, Nz)), np.zeros((Nx, Ny+1, Nz)), np.zeros((Nx, Ny, Nz+1))
 
 #diagnostics
 
